@@ -11,6 +11,11 @@ adheres to [Semantic Versioning][semver].
 
 ## [Unreleased]
 
+### Added
+
+- Added an isolated uTLS handshake spike with preset/custom extension-order,
+  ALPN overrides, and capture of the ClientHello bytes actually written.
+
 [unreleased]: https://github.com/ameshkov/gocurl/compare/v1.6.0...HEAD
 
 ## [1.6.0] - 2026-08-08
