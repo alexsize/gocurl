@@ -1,9 +1,9 @@
 # Техническое задание: расширение gocurl для запросов и TLS-отпечатков JA3Proxy
 
-Версия: 1.0  
-Статус: проект ТЗ  
-Целевой upstream: <https://github.com/ameshkov/gocurl>  
-Связанный проект: JA3Proxy
+- Версия: 1.1
+- Статус: проект ТЗ
+- Целевой upstream: <https://github.com/ameshkov/gocurl>
+- Связанный проект: JA3Proxy
 
 ## 1. Цель
 
