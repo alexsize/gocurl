@@ -49,12 +49,44 @@ Profile targets находятся в `./internal/client/utlsengine`, SOCKS targ
 Короткие прогоны не доказывают отсутствие всех ошибок. Пункт 8 остаётся
 частичным до длительных прогонов и аудита непокрытых критичных ветвей.
 Это не полный fuzz QUIC-стека или arbitrary HTTP/2 frame replay.
-Следующий P0/P1 приоритет: все исходники и vendored patch должны быть
-зафиксированы в собственном main goCURL, затем проверены из чистого checkout
-и свежим CI. Локальный успешный gate не равен выполнению этих требований.
-API/CLI parity остаётся частичной по критериям текущего ТЗ. Коммит, push,
-GitHub release и новая версия данным отчётом не подтверждаются.
+P0 воспроизводимости закрыт локальной фиксацией и чистым checkout ниже.
+Следующий P1 приоритет — исчерпывающая API/CLI parity (пункт 5); свежий CI
+и межплатформенные результаты пункта 7 ещё не подтверждены.
+Push, GitHub release и новая версия не выполнялись.
 
 Обновлены README, AGENTS, CHANGELOG и ТЗ: исправлены body framing duplication,
 QUIC ACK/payload examples, HRR report semantics и local/opt-in test policy.
 Флаги, публичный API и JSON Schema не расширялись.
+
+## Фиксация и чистый checkout
+
+После staged GitNexus analysis (CRITICAL для всего накопленного scope:
+1833 изменённых символа, 194 затронутых потока) пользователь явно разрешил
+checkpoint всего набора в `main`. Создан локальный коммит
+`93420270cb49a0ecd908fd38bf29c1e2df4ef68d`: 2077 изменённых файлов, включая
+1922 файла vendor. Всего Git отслеживает 2090 файлов; untracked source files
+после фиксации отсутствуют. Новые ветки, gitlink и релизный тег не создавались.
+В собственных кандидатах не найдены распространённые token/private-key
+literals; это целевая проверка, не гарантия обнаружения любого секрета.
+Среди staged paths нет локальных баз, ключей, captures и бинарников.
+Upstream whitespace в vendor не переписывался; собственные файлы прошли
+`git diff --cached --check` без замечаний. Git нормализовал CRLF в index,
+не меняя семантику исходников.
+
+Создан независимый local clone `main` с отключённым CRLF-преобразованием:
+
+```text
+C:\Users\Alex\AppData\Local\Temp\gocurl-release-20261009-a6f29b256ca14c47a4e0444a9243923c
+```
+
+Из этого checkout прошёл полный `scripts/check.ps1` на Go 1.26.6/Windows
+amd64, включая race suite с benchmarks и vendored QUIC wire tests.
+Маркер: `CLEAN_CHECKOUT_GATE_PASS`. После gate
+`git status --porcelain=v1 --untracked-files=all` пустой.
+Проверка использует установленный toolchain, lint/Node и обычный module cache;
+она не заявляет offline build на машине с пустым dependency cache.
+Временный clone сохранён для воспроизведения и не включён в исходники.
+
+Корневой JA3Proxy — отдельный репозиторий: его накопленные изменения данным
+коммитом не фиксировались. Его fidelity-отчёт дополнен результатами ранее
+завершённых проверок, но чистый checkout основного проекта пока не подтверждён.
