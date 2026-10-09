@@ -12,7 +12,7 @@ jobs:
   tests:
     strategy:
       matrix:
-        go: [ stable ]
+        go: ['1.26.5']
         os:
           - windows-latest
           - macos-latest
@@ -22,11 +22,33 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: stable
+          go-version: ${{ matrix.go }}
+
+      - name: Verify modules
+        run: go mod verify
+
+      - name: Vet packages
+        run: go vet -mod=vendor ./...
 
       - name: Run tests
         run: |-
-          go test -race -v -bench=. -coverprofile=coverage.txt -covermode=atomic ./...
+          go test -race -count=1 -v '-bench=.' -mod=vendor '-coverprofile=coverage.txt' -covermode=atomic ./...
+
+      - name: Run vendored QUIC transport-parameter wire tests
+        run: |-
+          go test -race -count=1 -v -mod=vendor -run 'Test(ReorderTransportParametersKeepsGreaseAndUnlistedOrder|TransportParametersMarshalUsesConfiguredOrder|TransportParametersMarshalPreservesExplicitZeroValues)$' github.com/quic-go/quic-go/internal/wire
+
+      - name: Build all packages
+        run: go build -mod=vendor ./...
+
+      - name: Verify clean checkout
+        shell: pwsh
+        run: |-
+          $status = git status --porcelain --untracked-files=all
+          if ($status) {
+            $status | Write-Error
+            exit 1
+          }
 
       - name: Upload coverage
         uses: codecov/codecov-action@v7
@@ -44,7 +66,7 @@ jobs:
 
       - uses: actions/setup-go@v7
         with:
-          go-version: stable
+          go-version: '1.26.5'
 
       - name: Prepare environment
         run: |-

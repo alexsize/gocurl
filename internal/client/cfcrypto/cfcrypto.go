@@ -3,6 +3,7 @@
 package cfcrypto
 
 import (
+	"context"
 	"crypto/tls"
 	"net"
 	"slices"
@@ -52,12 +53,27 @@ func Handshake(
 	cfg *config.Config,
 	out *output.Output,
 ) (tlsConn net.Conn, err error) {
+	return HandshakeContext(context.Background(), conn, tlsConfig, resolver, cfg, out)
+}
+
+// HandshakeContext propagates cancellation through ECH discovery and TLS.
+func HandshakeContext(
+	ctx context.Context,
+	conn net.Conn,
+	tlsConfig *tls.Config,
+	resolver *resolve.Resolver,
+	cfg *config.Config,
+	out *output.Output,
+) (tlsConn net.Conn, err error) {
 	out.Debug("Attempting to establish a TLS connection")
 
 	var echConfigs []ctls.ECHConfig
 	if cfg.ECH {
-		echConfigs, err = resolver.LookupECHConfigs(tlsConfig.ServerName)
+		echConfigs, err = resolver.LookupECHConfigsContext(ctx, tlsConfig.ServerName)
 		if err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
 			// Continue even if ECH config is not found.
 			out.Info(
 				"Warning: ECH config not found for %s: %v",
@@ -112,7 +128,7 @@ func Handshake(
 
 	out.Debug("Starting TLS handshake")
 
-	err = c.Handshake()
+	err = c.HandshakeContext(ctx)
 	if err != nil {
 		return nil, err
 	}

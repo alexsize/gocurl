@@ -18,19 +18,26 @@ import (
 // Profile selects a uTLS preset and optionally overrides its extension order and ALPN list.
 // ExtensionOrder must be a permutation of the selected preset's extensions.
 type Profile struct {
-	Preset         string
-	ExtensionOrder []uint16
-	ALPN           []string
+	Preset              string
+	ExtensionOrder      []uint16
+	CipherSuites        []uint16
+	SupportedVersions   []uint16
+	SupportedGroups     []uint16
+	SignatureAlgorithms []uint16
+	ALPN                []string
 }
 
 // CaptureConn records bytes successfully written through Conn.
 type CaptureConn struct {
 	net.Conn
 
-	mu         sync.Mutex
-	sent       bytes.Buffer
-	complete   bool
-	captureErr error
+	mu             sync.Mutex
+	recordBuffer   []byte
+	handshakeBytes []byte
+	hellos         [][]byte
+	capturedBytes  int
+	captureDone    bool
+	captureErr     error
 }
 
 const maxClientHelloCaptureBytes = 1 << 20
@@ -40,17 +47,10 @@ func (c *CaptureConn) Write(p []byte) (n int, err error) {
 	n, err = c.Conn.Write(p)
 	if n > 0 {
 		c.mu.Lock()
-		if !c.complete && c.captureErr == nil {
-			if c.sent.Len()+n > maxClientHelloCaptureBytes {
-				c.captureErr = fmt.Errorf("uTLS capture: ClientHello exceeds %d bytes", maxClientHelloCaptureBytes)
-			} else {
-				_, _ = c.sent.Write(p[:n])
-				_, captureErr := extractClientHello(c.sent.Bytes())
-				if captureErr == nil {
-					c.complete = true
-				} else if !errors.Is(captureErr, errCaptureIncomplete) {
-					c.captureErr = captureErr
-				}
+		if !c.captureDone {
+			c.capturedBytes += n
+			if c.captureErr == nil {
+				c.captureWritten(p[:n])
 			}
 		}
 		c.mu.Unlock()
@@ -59,17 +59,116 @@ func (c *CaptureConn) Write(p []byte) (n int, err error) {
 	return n, err
 }
 
-// ClientHelloBytes returns the first complete ClientHello handshake message observed on the wire.
+// ClientHelloBytes returns the first complete ClientHello observed on the wire.
 func (c *CaptureConn) ClientHelloBytes() ([]byte, error) {
+	return c.ClientHelloBytesAt(1)
+}
+
+// ClientHelloBytesAt returns a complete, one-based ClientHello observation.
+func (c *CaptureConn) ClientHelloBytesAt(index int) ([]byte, error) {
 	c.mu.Lock()
-	data := bytes.Clone(c.sent.Bytes())
+	defer c.mu.Unlock()
+	if index < 1 {
+		return nil, fmt.Errorf("uTLS capture: ClientHello index must be positive")
+	}
 	captureErr := c.captureErr
-	c.mu.Unlock()
+	if index <= len(c.hellos) {
+		return bytes.Clone(c.hellos[index-1]), nil
+	}
 	if captureErr != nil {
 		return nil, captureErr
 	}
+	return nil, errCaptureIncomplete
+}
 
-	return extractClientHello(data)
+// ClientHelloCount returns how many complete ClientHello messages were observed.
+func (c *CaptureConn) ClientHelloCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.hellos)
+}
+
+// CaptureError returns an error observed while parsing the on-wire capture.
+func (c *CaptureConn) CaptureError() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.captureErr
+}
+
+// CapturedBytes returns the number of bytes accepted by the underlying
+// connection while capture was active.
+func (c *CaptureConn) CapturedBytes() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.capturedBytes
+}
+
+// StopCapture freezes the connection capture once the TLS handshake is done.
+func (c *CaptureConn) StopCapture() {
+	c.mu.Lock()
+	if c.captureErr == nil && (len(c.recordBuffer) > 0 || len(c.handshakeBytes) > 0) {
+		c.captureErr = errCaptureIncomplete
+	}
+	c.captureDone = true
+	c.recordBuffer = nil
+	c.handshakeBytes = nil
+	c.mu.Unlock()
+}
+
+func (c *CaptureConn) captureWritten(data []byte) {
+	if len(c.recordBuffer)+len(data) > maxClientHelloCaptureBytes {
+		c.captureErr = fmt.Errorf("uTLS capture: pending TLS data exceeds %d bytes", maxClientHelloCaptureBytes)
+		return
+	}
+	c.recordBuffer = append(c.recordBuffer, data...)
+	for len(c.recordBuffer) >= 5 {
+		recordLength := int(binary.BigEndian.Uint16(c.recordBuffer[3:5]))
+		if recordLength > maxClientHelloCaptureBytes {
+			c.captureErr = fmt.Errorf("uTLS capture: TLS record length %d exceeds capture limit", recordLength)
+			return
+		}
+		frameLength := 5 + recordLength
+		if len(c.recordBuffer) < frameLength {
+			return
+		}
+		contentType := c.recordBuffer[0]
+		payload := bytes.Clone(c.recordBuffer[5:frameLength])
+		c.recordBuffer = append(c.recordBuffer[:0], c.recordBuffer[frameLength:]...)
+		if contentType == 22 {
+			c.captureHandshakePayload(payload)
+			if c.captureErr != nil {
+				return
+			}
+		}
+	}
+}
+
+func (c *CaptureConn) captureHandshakePayload(payload []byte) {
+	if len(c.handshakeBytes)+len(payload) > maxClientHelloCaptureBytes {
+		c.captureErr = fmt.Errorf("uTLS capture: handshake data exceeds %d bytes", maxClientHelloCaptureBytes)
+		return
+	}
+	c.handshakeBytes = append(c.handshakeBytes, payload...)
+	for len(c.handshakeBytes) >= 4 {
+		messageLength := 4 + (int(c.handshakeBytes[1]) << 16) +
+			(int(c.handshakeBytes[2]) << 8) + int(c.handshakeBytes[3])
+		if messageLength > maxClientHelloCaptureBytes {
+			c.captureErr = fmt.Errorf("uTLS capture: handshake message exceeds %d bytes", maxClientHelloCaptureBytes)
+			return
+		}
+		if len(c.handshakeBytes) < messageLength {
+			return
+		}
+		message := bytes.Clone(c.handshakeBytes[:messageLength])
+		c.handshakeBytes = append(c.handshakeBytes[:0], c.handshakeBytes[messageLength:]...)
+		if message[0] == 1 {
+			if _, err := parseClientHello(message); err != nil {
+				c.captureErr = fmt.Errorf("uTLS capture: malformed ClientHello: %w", err)
+				return
+			}
+			c.hellos = append(c.hellos, message)
+		}
+	}
 }
 
 // Handshake applies profile to conn and returns the negotiated uTLS connection and its wire capture.
@@ -103,6 +202,7 @@ func Handshake(
 	}
 
 	capture = &CaptureConn{Conn: conn}
+	defer capture.StopCapture()
 	tlsConn = utls.UClient(capture, config.Clone(), utls.HelloCustom)
 	if err = tlsConn.ApplyPreset(&spec); err != nil {
 		return nil, capture, fmt.Errorf("uTLS: apply profile %q: %w", profile.Preset, err)
@@ -131,7 +231,33 @@ func presetID(name string) (id utls.ClientHelloID, err error) {
 	}
 }
 
+// ValidateProfile checks preset selection and supported ClientHello overrides
+// without opening a network connection.
+func ValidateProfile(profile Profile, serverName string) error {
+	id, err := presetID(profile.Preset)
+	if err != nil {
+		return err
+	}
+	spec, err := utls.UTLSIdToSpec(id)
+	if err != nil {
+		return fmt.Errorf("uTLS: load preset %q: %w", profile.Preset, err)
+	}
+	return applyProfile(&spec, serverName, profile)
+}
+
 func applyProfile(spec *utls.ClientHelloSpec, serverName string, profile Profile) (err error) {
+	if len(profile.CipherSuites) > 0 {
+		spec.CipherSuites = append([]uint16(nil), profile.CipherSuites...)
+	}
+	if err = overrideProfileExtension(spec.Extensions, 43, profile.SupportedVersions); err != nil {
+		return err
+	}
+	if err = overrideProfileExtension(spec.Extensions, 10, profile.SupportedGroups); err != nil {
+		return err
+	}
+	if err = overrideProfileExtension(spec.Extensions, 13, profile.SignatureAlgorithms); err != nil {
+		return err
+	}
 	extensions := make(map[uint16][]utls.TLSExtension, len(spec.Extensions))
 	for _, extension := range spec.Extensions {
 		if sni, ok := extension.(*utls.SNIExtension); ok {
@@ -144,63 +270,45 @@ func applyProfile(spec *utls.ClientHelloSpec, serverName string, profile Profile
 		extensions[id] = append(extensions[id], extension)
 	}
 
-	if len(profile.ALPN) > 0 {
-		for _, protocol := range profile.ALPN {
-			if len(protocol) == 0 || len(protocol) > 255 {
-				return fmt.Errorf("uTLS: ALPN protocol length must be between 1 and 255 bytes; got %d", len(protocol))
-			}
-		}
-		var alpn *utls.ALPNExtension
-		for _, extension := range extensions[16] {
-			if candidate, ok := extension.(*utls.ALPNExtension); ok {
-				alpn = candidate
-				break
-			}
-		}
-		if alpn == nil {
-			return errors.New("uTLS: selected preset has no ALPN extension")
-		}
-		alpn.AlpnProtocols = append([]string(nil), profile.ALPN...)
+	if err = applyProfileALPN(extensions, profile.ALPN); err != nil {
+		return err
 	}
+	return applyProfileExtensionOrder(spec, extensions, profile)
+}
 
-	if len(profile.ExtensionOrder) == 0 {
+func overrideProfileExtension(extensions []utls.TLSExtension, extensionType uint16, values []uint16) error {
+	if len(values) == 0 {
 		return nil
 	}
-	availableExtensionCount := len(spec.Extensions)
-	for _, extension := range spec.Extensions {
-		if padding, ok := extension.(*utls.UtlsPaddingExtension); ok && !padding.WillPad {
-			availableExtensionCount--
-		}
-	}
-	if len(profile.ExtensionOrder) != availableExtensionCount {
-		return fmt.Errorf("uTLS: extension order has %d entries; preset has %d active extensions", len(profile.ExtensionOrder), availableExtensionCount)
-	}
-
-	ordered := make([]utls.TLSExtension, 0, len(profile.ExtensionOrder))
-	used := make(map[uint16]int, len(profile.ExtensionOrder))
-	for _, requestedID := range profile.ExtensionOrder {
-		id := normalizeGREASE(requestedID)
-		variants := extensions[id]
-		index := used[id]
-		if index >= len(variants) {
-			return fmt.Errorf("uTLS: extension ID 0x%04x is not supported by preset %q", requestedID, profile.Preset)
-		}
-		used[id] = index + 1
-		ordered = append(ordered, variants[index])
-	}
-	for id, variants := range extensions {
-		if used[id] == len(variants) {
-			continue
-		}
-		for _, extension := range variants[used[id]:] {
-			padding, ok := extension.(*utls.UtlsPaddingExtension)
-			if !ok || padding.WillPad {
-				return fmt.Errorf("uTLS: extension order omits extension ID 0x%04x", id)
+	found := 0
+	for _, extension := range extensions {
+		switch typed := extension.(type) {
+		case *utls.SupportedVersionsExtension:
+			if extensionType == 43 {
+				typed.Versions = append([]uint16(nil), values...)
+				found++
+			}
+		case *utls.SupportedCurvesExtension:
+			if extensionType == 10 {
+				typed.Curves = make([]utls.CurveID, len(values))
+				for i, value := range values {
+					typed.Curves[i] = utls.CurveID(value)
+				}
+				found++
+			}
+		case *utls.SignatureAlgorithmsExtension:
+			if extensionType == 13 {
+				typed.SupportedSignatureAlgorithms = make([]utls.SignatureScheme, len(values))
+				for i, value := range values {
+					typed.SupportedSignatureAlgorithms[i] = utls.SignatureScheme(value)
+				}
+				found++
 			}
 		}
 	}
-	spec.Extensions = ordered
-
+	if found != 1 {
+		return fmt.Errorf("uTLS: profile requires exactly one extension 0x%04x, preset has %d", extensionType, found)
+	}
 	return nil
 }
 
@@ -248,7 +356,7 @@ func extensionID(extension utls.TLSExtension) (id uint16, err error) {
 }
 
 func normalizeGREASE(id uint16) uint16 {
-	if byte(id>>8) == byte(id) && byte(id)&0x0f == 0x0a {
+	if isGREASE(id) {
 		return 0x0a0a
 	}
 

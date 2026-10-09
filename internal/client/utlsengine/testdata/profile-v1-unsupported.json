@@ -1,0 +1,12 @@
+{
+  "schema_version": "ja3proxy-client-profile/1",
+  "id": "observed-client-1",
+  "version": 1,
+  "name": "Observed client with unsupported MUST field",
+  "profile_type": "OBSERVED",
+  "fields": {},
+  "policy": {"must_match": ["extensions.grease_behavior"]},
+  "expected": {},
+  "engine": {"name": "JA3Proxy", "version": "1"},
+  "replayability": {"status": "PARTIAL", "unsupported": ["extensions.grease_behavior"]}
+}

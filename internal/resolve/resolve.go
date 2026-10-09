@@ -2,6 +2,7 @@
 package resolve
 
 import (
+	"context"
 	"fmt"
 	"net"
 
@@ -57,6 +58,14 @@ func NewResolver(cfg *config.Config, out *output.Output) (r *Resolver, err error
 
 // LookupHost looks up all IP addresses of the hostname.
 func (r *Resolver) LookupHost(hostname string) (ipAddresses []net.IP, err error) {
+	return r.LookupHostContext(context.Background(), hostname)
+}
+
+// LookupHostContext resolves a hostname without losing caller cancellation.
+func (r *Resolver) LookupHostContext(ctx context.Context, hostname string) (ipAddresses []net.IP, err error) {
+	if err = ctx.Err(); err != nil {
+		return nil, err
+	}
 	r.out.Debug("Resolving IP addresses of %s", hostname)
 
 	ip := net.ParseIP(hostname)
@@ -92,8 +101,11 @@ func (r *Resolver) LookupHost(hostname string) (ipAddresses []net.IP, err error)
 	for _, qType := range qTypes {
 		msg := newMsg(hostname, qType)
 
-		resp, u, dnsErr := dnsLookupAll(msg, r.upstreams)
+		resp, u, dnsErr := dnsLookupAllContext(ctx, msg, r.upstreams)
 		if dnsErr != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
 			errs = append(errs, dnsErr)
 
 			// try another qType now.
@@ -128,6 +140,17 @@ func (r *Resolver) LookupHost(hostname string) (ipAddresses []net.IP, err error)
 // the specified hostname.  If no ECH configuration can be discovered for this
 // domain, the function returns ErrEmptyResponse (checked via errors.Is/As).
 func (r *Resolver) LookupECHConfigs(hostname string) (echConfigs []ctls.ECHConfig, err error) {
+	return r.LookupECHConfigsContext(context.Background(), hostname)
+}
+
+// LookupECHConfigsContext discovers ECH without blocking a canceled handshake.
+func (r *Resolver) LookupECHConfigsContext(
+	ctx context.Context,
+	hostname string,
+) (echConfigs []ctls.ECHConfig, err error) {
+	if err = ctx.Err(); err != nil {
+		return nil, err
+	}
 	r.out.Debug("Resolving ECH configuration for %s", hostname)
 
 	if len(r.cfg.ECHConfigs) > 0 {
@@ -140,7 +163,7 @@ func (r *Resolver) LookupECHConfigs(hostname string) (echConfigs []ctls.ECHConfi
 
 	var resp *dns.Msg
 	var u upstream.Upstream
-	resp, u, err = dnsLookupAll(m, r.upstreams)
+	resp, u, err = dnsLookupAllContext(ctx, m, r.upstreams)
 	if err != nil {
 		return nil, err
 	}
@@ -193,15 +216,20 @@ func (r *Resolver) lookupFromCfg(hostname string) (addrs []net.IP, ok bool) {
 	return nil, false
 }
 
-// dnsLookupAll sends the query m to each DNS resolver until it gets
-// a successful non-empty response.  If all attempts are unsuccessful, returns
-// an error.
-func dnsLookupAll(m *dns.Msg, upstreams []upstream.Upstream) (resp *dns.Msg, u upstream.Upstream, err error) {
+// dnsLookupAllContext tries each resolver until a non-empty response succeeds.
+func dnsLookupAllContext(
+	ctx context.Context,
+	m *dns.Msg,
+	upstreams []upstream.Upstream,
+) (resp *dns.Msg, u upstream.Upstream, err error) {
 	var errs []error
 
 	for _, u = range upstreams {
+		if err = ctx.Err(); err != nil {
+			return nil, nil, err
+		}
 		var dnsErr error
-		resp, dnsErr = dnsLookup(m, u)
+		resp, dnsErr = dnsLookupContext(ctx, m, u)
 		if dnsErr != nil {
 			errs = append(errs, dnsErr)
 		} else {
@@ -212,15 +240,16 @@ func dnsLookupAll(m *dns.Msg, upstreams []upstream.Upstream) (resp *dns.Msg, u u
 	return nil, nil, fmt.Errorf("dns lookup: %w", errors.Join(errs...))
 }
 
-// dnsLookup sends the query m over to DNS resolver addr and returns the
-// response.  Adds additional logic on top of it: returns an error when the
-// response code is not success or when there are no resource records.
-func dnsLookup(m *dns.Msg, u upstream.Upstream) (resp *dns.Msg, err error) {
-	resp, err = u.Exchange(m)
+// dnsLookupContext requires a successful response with resource records.
+func dnsLookupContext(ctx context.Context, m *dns.Msg, u upstream.Upstream) (resp *dns.Msg, err error) {
+	resp, err = exchangeDNSContext(ctx, m, u)
 	qTypeStr := dns.Type(m.Question[0].Qtype).String()
 
 	if err != nil {
 		return nil, err
+	}
+	if resp == nil {
+		return nil, ErrEmptyResponse
 	}
 
 	if resp.Rcode != dns.RcodeSuccess {

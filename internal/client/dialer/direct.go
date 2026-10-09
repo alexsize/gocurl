@@ -1,6 +1,7 @@
 package dialer
 
 import (
+	"context"
 	"net"
 	"time"
 
@@ -31,6 +32,11 @@ func NewDirect(resolver *resolve.Resolver, out *output.Output, connectTimeout ti
 
 // Dial implements Dialer for *Direct.
 func (d *Direct) Dial(network, addr string) (conn net.Conn, err error) {
+	return d.DialContext(context.Background(), network, addr)
+}
+
+// DialContext resolves and connects using the connection-phase context.
+func (d *Direct) DialContext(ctx context.Context, network, addr string) (conn net.Conn, err error) {
 	d.out.Debug("Connecting to %s://%s", network, addr)
 
 	host, port, err := net.SplitHostPort(addr)
@@ -38,7 +44,7 @@ func (d *Direct) Dial(network, addr string) (conn net.Conn, err error) {
 		return nil, err
 	}
 
-	ipAddrs, err := d.resolver.LookupHost(host)
+	ipAddrs, err := d.resolver.LookupHostContext(ctx, host)
 	if err != nil {
 		return nil, err
 	}
@@ -50,11 +56,7 @@ func (d *Direct) Dial(network, addr string) (conn net.Conn, err error) {
 		d.out.Debug("Connecting to %s://%s", network, connectAddr)
 	}
 
-	if d.connectTimeout > 0 {
-		conn, err = net.DialTimeout(network, net.JoinHostPort(ipAddr.String(), port), d.connectTimeout)
-	} else {
-		conn, err = net.Dial(network, net.JoinHostPort(ipAddr.String(), port))
-	}
+	conn, err = (&net.Dialer{Timeout: d.connectTimeout}).DialContext(ctx, network, connectAddr)
 	if err != nil {
 		return nil, err
 	}

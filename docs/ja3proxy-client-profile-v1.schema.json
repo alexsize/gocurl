@@ -1,0 +1,124 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/alexsize/gocurl/blob/main/docs/ja3proxy-client-profile-v1.schema.json",
+  "title": "JA3Proxy client profile v1",
+  "description": "Versioned interchange format for TLS ClientHello profiles. It must not contain secrets or raw captures.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "id", "version", "name", "profile_type", "fields", "policy", "expected", "engine", "replayability"],
+  "properties": {
+    "schema_version": {"const": "ja3proxy-client-profile/1"},
+    "id": {"type": "string", "minLength": 1},
+    "version": {"type": "integer", "minimum": 1},
+    "name": {"type": "string", "minLength": 1},
+    "profile_type": {"enum": ["PRESET", "OBSERVED", "CUSTOM", "RANDOMIZED"]},
+    "fields": {"$ref": "#/$defs/fields"},
+    "policy": {"$ref": "#/$defs/policy"},
+    "expected": {"$ref": "#/$defs/expected"},
+    "engine": {"$ref": "#/$defs/engine"},
+    "base_preset": {"$ref": "#/$defs/basePreset"},
+    "host_patterns": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "profile_mode": {"enum": ["STRICT", "ADAPTIVE"]},
+    "randomized_alpn": {"enum": ["AUTO", "REQUIRED", "DISABLED"]},
+    "source": {"$ref": "#/$defs/source"},
+    "replayability": {"$ref": "#/$defs/replayability"}
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "fields": {
+            "properties": {"alpn_policy": {"const": "CUSTOM"}},
+            "required": ["alpn_policy"]
+          }
+        },
+        "required": ["fields"]
+      },
+      "then": {
+        "properties": {
+          "fields": {
+            "properties": {"custom_alpn": {"$ref": "#/$defs/nonEmptyStringList"}},
+            "required": ["custom_alpn"]
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "basePreset": {
+      "type": "object", "additionalProperties": false,
+      "required": ["client", "version"],
+      "properties": {"client": {"type": "string", "minLength": 1}, "version": {"type": "string", "minLength": 1}}
+    },
+    "source": {
+      "type": "object", "additionalProperties": false,
+      "required": ["observation_id", "ja3", "ja3_hash", "ja4", "normalized_sha256", "normalization_version"],
+      "properties": {
+        "observation_id": {"type": "string", "minLength": 1}, "server_name": {"type": "string"},
+        "ja3": {"type": "string"}, "ja3_hash": {"type": "string"}, "ja4": {"type": "string"},
+        "normalized_sha256": {"type": "string"}, "normalization_version": {"type": "string"}
+      }
+    },
+    "replayability": {
+      "type": "object", "additionalProperties": false,
+      "required": ["status"],
+      "properties": {
+        "status": {"enum": ["REPLAYABLE", "PARTIAL", "UNSUPPORTED", "NON_DETERMINISTIC"]},
+        "unsupported": {"$ref": "#/$defs/nonEmptyStringList"},
+        "warnings": {"$ref": "#/$defs/stringList"}
+      }
+    },
+    "uint16List": {"type": "array", "items": {"type": "integer", "minimum": 0, "maximum": 65535}},
+    "stringList": {"type": "array", "items": {"type": "string"}},
+    "nonEmptyStringList": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "constraint": {
+      "type": "object", "additionalProperties": false,
+      "required": ["path", "operator"],
+      "properties": {"path": {"type": "string", "pattern": "^/"}, "operator": {"enum": ["present", "equals", "one_of"]}, "value": {}, "values": {"type": "array"}}
+    },
+    "fields": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "cipher_suites": {"$ref": "#/$defs/uint16List"},
+        "extension_order": {"$ref": "#/$defs/uint16List"},
+        "supported_versions": {"$ref": "#/$defs/uint16List"},
+        "supported_groups": {"$ref": "#/$defs/uint16List"},
+        "signature_algorithms": {"$ref": "#/$defs/uint16List"},
+        "alpn": {"$ref": "#/$defs/stringList"},
+        "alps": {"$ref": "#/$defs/stringList"},
+        "alpn_policy": {"enum": ["PROFILE", "DOWNSTREAM", "INTERSECTION", "CUSTOM"]},
+        "custom_alpn": {"$ref": "#/$defs/stringList"},
+        "alps_policy": {"enum": ["PROFILE", "DOWNSTREAM", "INTERSECTION", "CUSTOM"]},
+        "custom_alps": {"$ref": "#/$defs/stringList"},
+        "padding_length": {"type": "integer", "minimum": 0, "maximum": 65535}
+      }
+    },
+    "policy": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "must_match": {"$ref": "#/$defs/stringList"},
+        "should_match": {"$ref": "#/$defs/stringList"},
+        "ignored_dynamic": {"$ref": "#/$defs/stringList"},
+        "constraints": {"type": "array", "items": {"$ref": "#/$defs/constraint"}}
+      }
+    },
+    "expected": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "ja3": {"type": "string"}, "ja3_hash": {"type": "string"},
+        "ja4": {"type": "string"}, "normalized_sha256": {"type": "string"},
+        "normalization_version": {"type": "string"}, "materializer_version": {"type": "string"},
+        "ja3_version": {"type": "string"}, "ja4_version": {"type": "string"}
+      }
+    },
+    "engine": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1}, "version": {"type": "string", "minLength": 1},
+        "exporter": {"type": "string"}, "exporter_version": {"type": "string"},
+        "compatibility": {"type": "string"}
+      }
+    }
+  }
+}

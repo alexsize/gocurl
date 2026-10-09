@@ -3,11 +3,27 @@
 package connectto
 
 import (
+	"context"
 	"net"
 
 	"github.com/ameshkov/gocurl/internal/client/dialer"
 	"github.com/ameshkov/gocurl/internal/output"
 )
+
+// CreateContextDialFunc redirects connections without losing cancellation.
+func CreateContextDialFunc(
+	connectTo map[string]string,
+	base dialer.ContextDialFunc,
+	out *output.Output,
+) dialer.ContextDialFunc {
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		if target, ok := connectTo[addr]; ok {
+			out.Debug("Redirecting %s to %s", addr, target)
+			addr = target
+		}
+		return base(ctx, network, addr)
+	}
+}
 
 // CreateDialFunc creates a dialer.DialFunc that overrides the remote endpoint
 // if the address matches what an entry in the connectTo map.

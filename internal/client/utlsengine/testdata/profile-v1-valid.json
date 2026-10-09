@@ -1,0 +1,38 @@
+{
+  "schema_version": "ja3proxy-client-profile/1",
+  "id": "chrome-120-example",
+  "version": 1,
+  "name": "Chrome 120 example",
+  "profile_type": "PRESET",
+  "fields": {
+    "cipher_suites": [4865, 4866, 4867],
+    "supported_versions": [772, 771],
+    "supported_groups": [29, 23],
+    "signature_algorithms": [1027, 2052],
+    "alpn": ["http/1.1"],
+    "alpn_policy": "CUSTOM",
+    "custom_alpn": ["http/1.1"]
+  },
+  "policy": {
+    "must_match": ["fields.alpn"],
+    "should_match": ["fields.cipher_suites"],
+    "ignored_dynamic": [],
+    "constraints": [{"path": "/legacy_version", "operator": "equals", "value": 771}]
+  },
+  "expected": {
+    "normalization_version": "TLS-NORM-1",
+    "materializer_version": "utls-materializer/1",
+    "ja3_version": "ja3/1",
+    "ja4_version": "ja4/1"
+  },
+  "engine": {
+    "name": "uTLS",
+    "version": "v1.8.2",
+    "exporter": "JA3Proxy",
+    "exporter_version": "1",
+    "compatibility": "gocurl-utls/experimental"
+  },
+  "base_preset": {"client": "Chrome", "version": "120"},
+  "host_patterns": ["example.test"],
+  "replayability": {"status": "PARTIAL", "unsupported": ["fields.cipher_suites"], "warnings": ["cipher suites are inherited from the preset"]}
+}

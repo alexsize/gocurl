@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -105,6 +106,32 @@ func TestHandshakeAppliesCustomExtensionOrder(t *testing.T) {
 	}
 }
 
+func TestHandshakeAppliesTLSProfileFieldOverrides(t *testing.T) {
+	server := httptest.NewTLSServer(nil)
+	t.Cleanup(server.Close)
+	want := Profile{
+		Preset:              "chrome-120",
+		CipherSuites:        []uint16{0x1301, 0x1302, 0x1303},
+		SupportedVersions:   []uint16{0x0304, 0x0303},
+		SupportedGroups:     []uint16{0x001d, 0x0017},
+		SignatureAlgorithms: []uint16{0x0403, 0x0804},
+		ALPN:                []string{"http/1.1"},
+	}
+	tlsConn, capture := runHandshake(t, server.Listener.Addr().String(), want)
+	t.Cleanup(func() { _ = tlsConn.Close() })
+	got, err := capture.Fingerprint()
+	if err != nil {
+		t.Fatalf("Fingerprint() error = %v", err)
+	}
+	if !reflect.DeepEqual(got.CipherSuites, want.CipherSuites) ||
+		!reflect.DeepEqual(got.SupportedVersions, want.SupportedVersions) ||
+		!reflect.DeepEqual(got.SupportedGroups, want.SupportedGroups) ||
+		!reflect.DeepEqual(got.SignatureAlgorithms, want.SignatureAlgorithms) {
+		t.Fatalf("wire TLS fields = %+v, want cipher=%v versions=%v groups=%v signatures=%v",
+			got, want.CipherSuites, want.SupportedVersions, want.SupportedGroups, want.SignatureAlgorithms)
+	}
+}
+
 func TestHandshakeCapturesTargetClientHelloThroughHTTPConnect(t *testing.T) {
 	target := httptest.NewTLSServer(nil)
 	t.Cleanup(target.Close)
@@ -180,9 +207,7 @@ func TestExtractClientHelloAcrossTLSRecords(t *testing.T) {
 	fragments := [][]byte{hello[:split], hello[split:]}
 	var records []byte
 	for _, fragment := range fragments {
-		record := []byte{22, 3, 1, byte(len(fragment) >> 8), byte(len(fragment))}
-		records = append(records, record...)
-		records = append(records, fragment...)
+		records = append(records, tlsRecordForTest(fragment)...)
 	}
 	got, err := extractClientHello(records)
 	if err != nil {
@@ -191,6 +216,103 @@ func TestExtractClientHelloAcrossTLSRecords(t *testing.T) {
 	if string(got) != string(hello) {
 		t.Fatal("reassembled ClientHello differs from captured handshake bytes")
 	}
+}
+
+func TestCaptureConnRecordsEveryClientHello(t *testing.T) {
+	first := buildClientHelloForTest(
+		0x0303,
+		[]uint16{0x1301},
+		[]testExtension{{id: 16, data: []byte{0, 5, 2, 'h', '2', 1, 'x'}}},
+	)
+	second := buildClientHelloForTest(
+		0x0303,
+		[]uint16{0xc02f},
+		[]testExtension{{id: 16, data: []byte{0, 5, 2, 'h', '2', 1, 'x'}}},
+	)
+	conn := &CaptureConn{Conn: &writeOnlyConn{}}
+	for _, hello := range [][]byte{first, second} {
+		record := tlsRecordForTest(hello)
+		if _, err := conn.Write(record); err != nil {
+			t.Fatalf("CaptureConn.Write() error = %v", err)
+		}
+	}
+	conn.StopCapture()
+
+	if got := conn.ClientHelloCount(); got != 2 {
+		t.Fatalf("ClientHelloCount() = %d, want 2", got)
+	}
+	for index, want := range [][]byte{first, second} {
+		got, err := conn.ClientHelloBytesAt(index + 1)
+		if err != nil {
+			t.Fatalf("ClientHelloBytesAt(%d) error = %v", index+1, err)
+		}
+		if string(got) != string(want) {
+			t.Fatalf("ClientHelloBytesAt(%d) differs from observed message", index+1)
+		}
+	}
+	if _, err := conn.ClientHelloBytesAt(3); err == nil {
+		t.Fatal("ClientHelloBytesAt(3) succeeded; want incomplete capture error")
+	}
+}
+
+func TestCaptureConnMarksPartialRepeatedClientHelloIncomplete(t *testing.T) {
+	first := buildClientHelloForTest(
+		0x0303,
+		[]uint16{0x1301},
+		[]testExtension{{id: 16, data: []byte{0, 5, 2, 'h', '2', 1, 'x'}}},
+	)
+	capture := &CaptureConn{Conn: &writeOnlyConn{}}
+	record := tlsRecordForTest(first)
+	if _, err := capture.Write(record); err != nil {
+		t.Fatal(err)
+	}
+	// The second record advertises a longer payload than was actually written.
+	if _, err := capture.Write([]byte{22, 3, 1, 0, 8, 1, 0, 0}); err != nil {
+		t.Fatal(err)
+	}
+	capture.StopCapture()
+	checks := CaptureObservations(capture)
+	if len(checks) != 2 || checks[0].Status != "OBSERVED" || checks[1].Status != "INCOMPLETE" {
+		t.Fatalf("observations = %+v, want OBSERVED then INCOMPLETE", checks)
+	}
+}
+
+type writeOnlyConn struct{ net.Conn }
+
+func (*writeOnlyConn) Write(p []byte) (int, error) { return len(p), nil }
+
+func TestBeginProfileCheckAttemptIncrementsPerRequest(t *testing.T) {
+	ctx, _ := NewProfileCheckContext(context.Background())
+	if got := BeginProfileCheckAttempt(ctx); got != 1 {
+		t.Fatalf("first attempt = %d, want 1", got)
+	}
+	if got := BeginProfileCheckAttempt(ctx); got != 2 {
+		t.Fatalf("second attempt = %d, want 2", got)
+	}
+}
+
+func FuzzCaptureConnClientHelloRecords(f *testing.F) {
+	hello := buildClientHelloForTest(
+		0x0303,
+		[]uint16{0x1301},
+		[]testExtension{{id: 16, data: []byte{0, 5, 2, 'h', '2', 1, 'x'}}},
+	)
+	record := tlsRecordForTest(hello)
+	f.Add(record)
+	f.Add([]byte(nil))
+	f.Add([]byte{22, 3, 1, 0xff, 0xff})
+	f.Add([]byte{22, 3, 1, 0, 4, 1, 0, 0, 0})
+	f.Fuzz(func(t *testing.T, data []byte) {
+		capture := &CaptureConn{Conn: &writeOnlyConn{}}
+		if _, err := capture.Write(data); err != nil {
+			t.Fatalf("capture.Write() error = %v", err)
+		}
+		capture.StopCapture()
+		for index := 1; index <= capture.ClientHelloCount()+1; index++ {
+			_, _ = capture.ClientHelloBytesAt(index)
+			_, _ = capture.FingerprintAt(index)
+		}
+	})
 }
 
 func TestApplyProfileRejectsIncompleteOrDuplicateExtensionOrder(t *testing.T) {

@@ -14,6 +14,7 @@ import (
 	"github.com/ameshkov/gocurl/internal/client/websocket"
 	"github.com/ameshkov/gocurl/internal/config"
 	"github.com/ameshkov/gocurl/internal/output"
+	publicgocurl "github.com/ameshkov/gocurl/pkg/gocurl"
 	goFlags "github.com/jessevdk/go-flags"
 )
 
@@ -34,9 +35,15 @@ func Main() {
 	}
 
 	if err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "Failed to parse args: %v", err)
+		parseErr := fmt.Errorf("failed to parse args: %w", err)
+		if jsonOutputRequested(os.Args[1:]) {
+			out := output.NewOutputWithWriters(os.Stdout, os.Stderr, false, true)
+			out.Error("%v", &ExitCodeError{code: 2, err: parseErr})
+		} else {
+			_, _ = fmt.Fprintln(os.Stderr, parseErr)
+		}
 
-		os.Exit(1)
+		os.Exit(2)
 	}
 
 	out, err := output.NewOutput(cfg.OutputPath, cfg.Verbose, cfg.OutputJSON)
@@ -45,8 +52,13 @@ func Main() {
 	}
 
 	if err := Run(cfg, out); err != nil {
+		err = withExitCode(err, 3)
 		out.Error("%v", err)
-		os.Exit(1)
+		var coded interface{ ExitCode() int }
+		if errors.As(err, &coded) {
+			os.Exit(coded.ExitCode())
+		}
+		os.Exit(3)
 	}
 }
 
@@ -59,27 +71,27 @@ func Run(cfg *config.Config, out *output.Output) error {
 	if err != nil {
 		return fmt.Errorf("failed to create HTTP transport: %w", err)
 	}
+	defer func() {
+		if conn := transport.Conn(); conn != nil {
+			_ = conn.Close()
+		}
+	}()
 
 	req, err := client.NewRequest(cfg)
 	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
+		return &ExitCodeError{code: 2, err: fmt.Errorf("failed to create request: %w", err)}
 	}
 
-	// This is a strange thing, but for the sake of logging WITH the request
-	// body it is easier to create a second request.
-	//
-	// TODO(ameshkov): refactor this.
-	cloneReq, _ := client.NewRequest(cfg)
-	out.DebugRequest(cloneReq)
+	if cfg.Verbose {
+		debugRequest(req, out)
+	}
 
-	resp, err := transport.RoundTrip(req)
+	result, err := publicgocurl.DoWithTransport(req.Context(), req, transport)
 	if err != nil {
 		return fmt.Errorf("failed to make request: %w", err)
 	}
-
-	defer func(body io.ReadCloser) {
-		_ = body.Close()
-	}(resp.Body)
+	defer result.Close()
+	resp := result.Response
 
 	// Response body is only written when we're sure that it is there and can
 	// be fully read.
@@ -108,25 +120,77 @@ func Run(cfg *config.Config, out *output.Output) error {
 	// "data" command-line argument, it is sent as a text frame, and then it
 	// waits until the response comes from the server.
 	if websocket.IsWebSocketResponse(resp) {
-		wsConn := websocket.NewWebSocket(transport.Conn(), out)
+		stream, ok := resp.Body.(io.ReadWriteCloser)
+		if !ok {
+			return fmt.Errorf("WebSocket response has no full-duplex stream")
+		}
+		wsConn := websocket.NewWebSocketStream(stream, out)
 		defer func() {
 			_ = wsConn.Close()
 		}()
 
 		if cfg.Data != "" {
-			_, wsErr := wsConn.Write([]byte(cfg.Data))
-			if wsErr == nil {
-				var b []byte
-				b, wsErr = io.ReadAll(wsConn)
-				if wsErr == nil {
-					responseBody = io.NopCloser(bytes.NewReader(b))
-				}
+			if _, wsErr := wsConn.Write([]byte(cfg.Data)); wsErr != nil {
+				return fmt.Errorf("write WebSocket message: %w", wsErr)
 			}
+			b, wsErr := io.ReadAll(wsConn)
+			if wsErr != nil {
+				return fmt.Errorf("read WebSocket message: %w", wsErr)
+			}
+			responseBody = io.NopCloser(bytes.NewReader(b))
 		}
 	}
 
 	// Write the response contents to the output.
-	out.Write(resp, responseBody, cfg)
+	return out.Write(resp, responseBody, cfg)
+}
 
-	return nil
+// debugRequest preserves the actual request headers and never consumes a live
+// file/stdin stream. Only bodies with a replay factory are copied for logging.
+func debugRequest(req *http.Request, out *output.Output) {
+	clone := req.Clone(req.Context())
+	clone.Body = http.NoBody
+	clone.ContentLength = 0
+	if req.GetBody != nil {
+		body, err := req.GetBody()
+		if err != nil {
+			out.Debug("Cannot copy request body for debug logging: %v", err)
+		} else {
+			clone.Body = body
+			clone.ContentLength = req.ContentLength
+			if body != nil {
+				defer func() { _ = body.Close() }()
+			}
+		}
+	}
+	out.DebugRequest(clone)
+}
+
+// ExitCodeError carries a process exit code while preserving the original error.
+type ExitCodeError struct {
+	code int
+	err  error
+}
+
+func (e *ExitCodeError) Error() string { return e.err.Error() }
+func (e *ExitCodeError) Unwrap() error { return e.err }
+
+// ExitCode returns the process status associated with the wrapped error.
+func (e *ExitCodeError) ExitCode() int { return e.code }
+
+func withExitCode(err error, fallback int) error {
+	var coded interface{ ExitCode() int }
+	if errors.As(err, &coded) {
+		return err
+	}
+	return &ExitCodeError{code: fallback, err: err}
+}
+
+func jsonOutputRequested(args []string) bool {
+	for _, arg := range args {
+		if arg == "--json-output" || arg == "--json-output=true" || arg == "--json-output=1" {
+			return true
+		}
+	}
+	return false
 }

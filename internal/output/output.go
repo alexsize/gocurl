@@ -8,13 +8,16 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
+	"github.com/ameshkov/gocurl/internal/client/utlsengine"
 	"github.com/ameshkov/gocurl/internal/config"
 )
 
@@ -44,7 +47,7 @@ func NewOutput(path string, verbose bool, jsonOutput bool) (o *Output, err error
 	logWriter = os.Stderr
 
 	if path != "" {
-		dataWriter, err = os.OpenFile(path, os.O_WRONLY|os.O_CREATE, 0o644)
+		dataWriter, err = os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
 	}
 
 	o = NewOutputWithWriters(dataWriter, logWriter, verbose, jsonOutput)
@@ -66,14 +69,14 @@ func NewOutputWithWriters(dataWriter Writer, logWriter Writer, verbose bool, jso
 }
 
 // Write writes received data to the output path (or stdout if not specified).
-func (o *Output) Write(resp *http.Response, responseBody io.Reader, cfg *config.Config) {
+func (o *Output) Write(resp *http.Response, responseBody io.Reader, cfg *config.Config) error {
 	var err error
 
 	if cfg.OutputJSON {
 		var b []byte
-		b, err = responseToJSON(resp, responseBody)
+		b, err = responseToJSON(resp, responseBody, cfg)
 		if err != nil {
-			panic(err)
+			return fmt.Errorf("encode response: %w", err)
 		}
 
 		_, err = o.dataFileWriter.Write(b)
@@ -84,9 +87,9 @@ func (o *Output) Write(resp *http.Response, responseBody io.Reader, cfg *config.
 	}
 
 	if err != nil {
-		msg := fmt.Sprintf("Failed to write response: %v", err)
-		_, _ = o.logFileWriter.WriteString(msg + "\n")
+		return fmt.Errorf("write response: %w", err)
 	}
+	return nil
 }
 
 // Info writes INFO-level log to the log file (or stderr).
@@ -106,7 +109,22 @@ func (o *Output) Error(format string, args ...any) {
 
 	if o.jsonOutput {
 		// Write error as JSON to the output file (stdout by default)
-		errorJSON := map[string]string{"error": msg}
+		errorJSON := map[string]any{"error": msg}
+		for _, arg := range args {
+			errorValue, ok := arg.(error)
+			if !ok {
+				continue
+			}
+			var coded interface{ ExitCode() int }
+			if errors.As(errorValue, &coded) {
+				errorJSON["exit_code"] = coded.ExitCode()
+			}
+			var status interface{ Status() string }
+			if errors.As(errorValue, &status) {
+				errorJSON["status"] = status.Status()
+			}
+			break
+		}
 		b, err := json.MarshalIndent(errorJSON, "", "  ")
 		if err != nil {
 			panic(err)
@@ -237,12 +255,28 @@ type TLSState struct {
 
 // ResponseData is a helper object for serializing response data to JSON.
 type ResponseData struct {
-	StatusCode int                 `json:"status_code"`
-	Status     string              `json:"status"`
-	Proto      string              `json:"proto"`
-	TLS        *TLSState           `json:"tls"`
-	Headers    map[string][]string `json:"headers"`
-	BodyBase64 string              `json:"body_base64"`
+	StatusCode  int                           `json:"status_code"`
+	Status      string                        `json:"status"`
+	Proto       string                        `json:"proto"`
+	Request     *RequestData                  `json:"request,omitempty"`
+	TLS         *TLSState                     `json:"tls"`
+	Headers     map[string][]string           `json:"headers"`
+	BodyBase64  string                        `json:"body_base64"`
+	Connections []utlsengine.ConnectionReport `json:"connections,omitempty"`
+}
+
+// RequestData describes the prepared outbound request associated with a response.
+type RequestData struct {
+	Method                string      `json:"method"`
+	URL                   string      `json:"url"`
+	Protocol              string      `json:"protocol"`
+	Host                  string      `json:"host"`
+	RequestTarget         string      `json:"request_target"`
+	Headers               http.Header `json:"headers"`
+	ConfiguredHeaderOrder []string    `json:"configured_header_order,omitempty"`
+	RedactedHeaderNames   []string    `json:"redacted_header_names,omitempty"`
+	ContentLength         int64       `json:"content_length"`
+	TransferEncoding      []string    `json:"transfer_encoding,omitempty"`
 }
 
 // stateToTLSState converts tls.ConnectionState to TLSState.
@@ -272,14 +306,14 @@ func stateToTLSState(state *tls.ConnectionState) (s *TLSState) {
 }
 
 // responseToJSON transforms response data to JSON format.
-func responseToJSON(resp *http.Response, responseBody io.Reader) (b []byte, err error) {
+func responseToJSON(resp *http.Response, responseBody io.Reader, cfg *config.Config) (b []byte, err error) {
 	var body []byte
 
 	if responseBody != nil {
-		// Ignore errors when reading response body.
-		//
-		// TODO(ameshkov): This is a quick crutch, it needs to be logged at least.
-		body, _ = io.ReadAll(responseBody)
+		body, err = io.ReadAll(responseBody)
+		if err != nil {
+			return nil, fmt.Errorf("read response body: %w", err)
+		}
 	}
 
 	if body == nil {
@@ -297,10 +331,80 @@ func responseToJSON(resp *http.Response, responseBody io.Reader) (b []byte, err 
 	if resp.TLS != nil {
 		data.TLS = stateToTLSState(resp.TLS)
 	}
+	if resp.Request != nil {
+		target := resp.Request.URL.RequestURI()
+		if cfg != nil && cfg.RequestTarget != "" {
+			target = cfg.RequestTarget
+		}
+		headers := resp.Request.Header.Clone()
+		redactedNames := redactHeaderValues(headers, cfg)
+		requestURL := *resp.Request.URL
+		if requestURL.User != nil && isJSONRedactedHeader("Authorization", cfg) {
+			requestURL.User = nil
+			headers.Set("Authorization", "[REDACTED]")
+			hasAuthorization := false
+			for _, name := range redactedNames {
+				hasAuthorization = hasAuthorization || strings.EqualFold(name, "Authorization")
+			}
+			if !hasAuthorization {
+				redactedNames = append(redactedNames, "Authorization")
+			}
+			sort.Strings(redactedNames)
+		}
+		data.Request = &RequestData{
+			Method:              resp.Request.Method,
+			URL:                 requestURL.String(),
+			Protocol:            resp.Proto,
+			Host:                resp.Request.Host,
+			RequestTarget:       target,
+			Headers:             headers,
+			RedactedHeaderNames: redactedNames,
+			ContentLength:       resp.Request.ContentLength,
+			TransferEncoding:    append([]string(nil), resp.Request.TransferEncoding...),
+		}
+		if cfg != nil {
+			data.Request.ConfiguredHeaderOrder = append([]string(nil), cfg.OrderedHeaders...)
+			for i, line := range data.Request.ConfiguredHeaderOrder {
+				name, _, ok := strings.Cut(line, ":")
+				if ok && isJSONRedactedHeader(name, cfg) {
+					data.Request.ConfiguredHeaderOrder[i] = strings.TrimSpace(name) + ": [REDACTED]"
+				}
+			}
+		}
+		if connections, ok := utlsengine.ProfileCheckReports(resp.Request.Context()); ok {
+			data.Connections = connections
+		}
+	}
 
 	b, err = json.MarshalIndent(data, "", "  ")
 
 	return b, err
+}
+
+func redactHeaderValues(headers http.Header, cfg *config.Config) (redacted []string) {
+	if cfg == nil || len(cfg.JSONRedactHeaders) == 0 {
+		return nil
+	}
+	for name := range headers {
+		if isJSONRedactedHeader(name, cfg) {
+			headers[name] = []string{"[REDACTED]"}
+			redacted = append(redacted, name)
+		}
+	}
+	sort.Strings(redacted)
+	return redacted
+}
+
+func isJSONRedactedHeader(name string, cfg *config.Config) bool {
+	if cfg == nil {
+		return false
+	}
+	for _, redacted := range cfg.JSONRedactHeaders {
+		if strings.EqualFold(name, redacted) {
+			return true
+		}
+	}
+	return false
 }
 
 // certToPEM serializes certificate bytes to PEM format.

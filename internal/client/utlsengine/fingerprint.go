@@ -12,9 +12,19 @@ import (
 
 // Fingerprint contains JA3 and JA4 values calculated from an observed ClientHello.
 type Fingerprint struct {
-	JA3String string
-	JA3       string
-	JA4       string
+	JA3String            string   `json:"ja3_string"`
+	JA3                  string   `json:"ja3_hash"`
+	JA4                  string   `json:"ja4"`
+	NormalizedSHA256     string   `json:"normalized_sha256"`
+	NormalizationVersion string   `json:"normalization_version"`
+	NormalizationError   string   `json:"normalization_error,omitempty"`
+	CipherSuites         []uint16 `json:"cipher_suites"`
+	ExtensionOrder       []uint16 `json:"extension_order"`
+	ALPN                 []string `json:"alpn"`
+	SupportedVersions    []uint16 `json:"supported_versions,omitempty"`
+	SupportedGroups      []uint16 `json:"supported_groups,omitempty"`
+	SignatureAlgorithms  []uint16 `json:"signature_algorithms,omitempty"`
+	normalizedDocument   []byte
 }
 
 // FingerprintClientHello parses a captured ClientHello handshake message and computes JA3 and JA4.
@@ -25,22 +35,70 @@ func FingerprintClientHello(hello []byte) (fingerprint Fingerprint, err error) {
 	}
 
 	ja3String := parsed.ja3String()
-	ja3Hash := md5.Sum([]byte(ja3String))
+	ja3Hash := md5.Sum([]byte(ja3String)) // #nosec G401 -- JA3 defines MD5 as a fingerprint encoding, not for security.
 	ja4, err := parsed.ja4()
 	if err != nil {
 		return fingerprint, err
 	}
+	normalizedDocument, normalizationErr := normalizedClientHelloDocument(parsed)
+	normalizedHash := ""
+	if normalizationErr == nil {
+		normalizedHash = normalizedDocumentSHA256(normalizedDocument)
+	}
+	normalizationError := ""
+	if normalizationErr != nil {
+		normalizationError = normalizationErr.Error()
+	}
 
 	return Fingerprint{
-		JA3String: ja3String,
-		JA3:       hex.EncodeToString(ja3Hash[:]),
-		JA4:       ja4,
+		JA3String:            ja3String,
+		JA3:                  hex.EncodeToString(ja3Hash[:]),
+		JA4:                  ja4,
+		NormalizedSHA256:     normalizedHash,
+		NormalizationVersion: TLSNormalizationVersion,
+		NormalizationError:   normalizationError,
+		normalizedDocument:   normalizedDocument,
+		CipherSuites:         append([]uint16(nil), parsed.ciphers...),
+		ExtensionOrder:       parsed.extensionOrder(),
+		ALPN:                 parsed.alpn(),
+		SupportedVersions:    append([]uint16(nil), parsed.supportedVersions...),
+		SupportedGroups:      append([]uint16(nil), parsed.supportedGroups...),
+		SignatureAlgorithms:  append([]uint16(nil), parsed.signatureAlgorithms...),
 	}, nil
+}
+
+func (h parsedClientHello) extensionOrder() (order []uint16) {
+	for _, extension := range h.extensions {
+		id := extension.id
+		if isGREASE(id) {
+			id = 0x0a0a
+		}
+		order = append(order, id)
+	}
+
+	return order
+}
+
+func (h parsedClientHello) alpn() (protocols []string) {
+	for _, extension := range h.extensions {
+		if extension.id != 16 {
+			continue
+		}
+		protocols, _ = parseALPN(extension.data)
+		return protocols
+	}
+
+	return nil
 }
 
 // Fingerprint returns JA3 and JA4 calculated from the ClientHello observed by this connection.
 func (c *CaptureConn) Fingerprint() (fingerprint Fingerprint, err error) {
-	hello, err := c.ClientHelloBytes()
+	return c.FingerprintAt(1)
+}
+
+// FingerprintAt calculates the fingerprint of one-based ClientHello index.
+func (c *CaptureConn) FingerprintAt(index int) (fingerprint Fingerprint, err error) {
+	hello, err := c.ClientHelloBytesAt(index)
 	if err != nil {
 		return fingerprint, err
 	}
@@ -49,9 +107,14 @@ func (c *CaptureConn) Fingerprint() (fingerprint Fingerprint, err error) {
 }
 
 type parsedClientHello struct {
-	legacyVersion uint16
-	ciphers       []uint16
-	extensions    []parsedExtension
+	legacyVersion       uint16
+	sessionIDLength     int
+	ciphers             []uint16
+	compressionMethods  []int
+	extensions          []parsedExtension
+	supportedVersions   []uint16
+	supportedGroups     []uint16
+	signatureAlgorithms []uint16
 }
 
 type parsedExtension struct {
@@ -73,9 +136,12 @@ func parseClientHello(message []byte) (hello parsedClientHello, err error) {
 	}
 	hello.legacyVersion = binary.BigEndian.Uint16(data[:2])
 	data = data[2+32:]
-	if _, data, err = readVector(data, 1); err != nil {
+	sessionID, rest, err := readVector(data, 1)
+	if err != nil {
 		return hello, fmt.Errorf("ClientHello: session ID: %w", err)
 	}
+	hello.sessionIDLength = len(sessionID)
+	data = rest
 	cipherBytes, rest, err := readVector(data, 2)
 	if err != nil {
 		return hello, fmt.Errorf("ClientHello: cipher suites: %w", err)
@@ -95,57 +161,15 @@ func parseClientHello(message []byte) (hello parsedClientHello, err error) {
 	if len(compressionMethods) == 0 {
 		return hello, fmt.Errorf("ClientHello: compression methods are empty")
 	}
+	for _, method := range compressionMethods {
+		hello.compressionMethods = append(hello.compressionMethods, int(method))
+	}
 	data = rest
 	if len(data) == 0 {
 		return hello, nil
 	}
-	extensionBytes, rest, err := readVector(data, 2)
-	if err != nil {
-		return hello, fmt.Errorf("ClientHello: extensions: %w", err)
-	}
-	if len(rest) != 0 {
-		return hello, fmt.Errorf("ClientHello: %d unexpected trailing bytes", len(rest))
-	}
-	for len(extensionBytes) > 0 {
-		if len(extensionBytes) < 4 {
-			return hello, fmt.Errorf("ClientHello: truncated extension header")
-		}
-		id := binary.BigEndian.Uint16(extensionBytes[:2])
-		extensionLength := int(binary.BigEndian.Uint16(extensionBytes[2:4]))
-		extensionBytes = extensionBytes[4:]
-		if extensionLength > len(extensionBytes) {
-			return hello, fmt.Errorf("ClientHello: extension 0x%04x length %d exceeds remaining data", id, extensionLength)
-		}
-		extension := parsedExtension{
-			id:   id,
-			data: extensionBytes[:extensionLength],
-		}
-		switch id {
-		case 10, 13:
-			if _, parseErr := parseUint16Vector(extension.data, 2); parseErr != nil {
-				return hello, fmt.Errorf("ClientHello: extension 0x%04x: %w", id, parseErr)
-			}
-		case 11:
-			if _, rest, parseErr := readVector(extension.data, 1); parseErr != nil || len(rest) != 0 {
-				if parseErr == nil {
-					parseErr = fmt.Errorf("trailing bytes after point formats")
-				}
-				return hello, fmt.Errorf("ClientHello: extension 0x%04x: %w", id, parseErr)
-			}
-		case 16:
-			if _, parseErr := parseALPN(extension.data); parseErr != nil {
-				return hello, fmt.Errorf("ClientHello: extension 0x%04x: %w", id, parseErr)
-			}
-		case 43:
-			if _, parseErr := parseUint16Vector(extension.data, 1); parseErr != nil {
-				return hello, fmt.Errorf("ClientHello: extension 0x%04x: %w", id, parseErr)
-			}
-		}
-		hello.extensions = append(hello.extensions, extension)
-		extensionBytes = extensionBytes[extensionLength:]
-	}
-
-	return hello, nil
+	err = parseClientHelloExtensions(&hello, data)
+	return hello, err
 }
 
 func readVector(data []byte, prefixBytes int) (vector, rest []byte, err error) {
@@ -214,72 +238,40 @@ func (h parsedClientHello) ja4() (fingerprint string, err error) {
 			ciphers = append(ciphers, cipher)
 		}
 	}
-	extensions := make([]uint16, 0, len(h.extensions))
-	version := h.legacyVersion
-	sni := false
-	alpn := "00"
-	var signatureAlgorithms []uint16
-	for _, extension := range h.extensions {
-		if isGREASE(extension.id) {
-			continue
-		}
-		switch extension.id {
-		case 0:
-			sni = true
-		case 16:
-			protocols, parseErr := parseALPN(extension.data)
-			if parseErr != nil {
-				return "", fmt.Errorf("ClientHello: ALPN extension: %w", parseErr)
-			}
-			if len(protocols) > 0 {
-				alpn = ja4ALPN(protocols[0])
-			}
-		case 13:
-			var values []uint16
-			values, err = parseUint16Vector(extension.data, 2)
-			if err != nil {
-				return "", fmt.Errorf("ClientHello: signature algorithms: %w", err)
-			}
-			for _, value := range values {
-				if !isGREASE(value) {
-					signatureAlgorithms = append(signatureAlgorithms, value)
-				}
-			}
-		case 43:
-			versions, parseErr := parseUint16Vector(extension.data, 1)
-			if parseErr != nil {
-				return "", fmt.Errorf("ClientHello: supported versions: %w", parseErr)
-			}
-			version = 0
-			for _, candidate := range versions {
-				if !isGREASE(candidate) && candidate > version {
-					version = candidate
-				}
-			}
-		}
-		if extension.id != 0 && extension.id != 16 {
-			extensions = append(extensions, extension.id)
-		}
+	fields, err := collectJA4ExtensionFields(h)
+	if err != nil {
+		return "", err
 	}
 
 	sort.Slice(ciphers, func(i, j int) bool { return ciphers[i] < ciphers[j] })
-	sort.Slice(extensions, func(i, j int) bool { return extensions[i] < extensions[j] })
+	sort.Slice(fields.extensions, func(i, j int) bool { return fields.extensions[i] < fields.extensions[j] })
 	ja4b := truncatedSHA256(formatHexValues(ciphers))
 	ja4c := "000000000000"
-	if len(extensions) > 0 {
-		input := formatHexValues(extensions)
-		if len(signatureAlgorithms) > 0 {
-			input += "_" + formatHexValues(signatureAlgorithms)
+	if len(fields.extensions) > 0 {
+		input := formatHexValues(fields.extensions)
+		if len(fields.signatureAlgorithms) > 0 {
+			input += "_" + formatHexValues(fields.signatureAlgorithms)
 		}
 		ja4c = truncatedSHA256(input)
 	}
 	nameFlag := "i"
-	if sni {
+	if fields.sni {
 		nameFlag = "d"
 	}
 
-	return fmt.Sprintf("t%s%s%02d%02d%s_%s_%s", ja4Version(version), nameFlag,
-		min(len(ciphers), 99), min(len(h.extensions)-countGREASEExtensions(h.extensions), 99), alpn, ja4b, ja4c), nil
+	return fmt.Sprintf(
+		"t%s%s%02d%02d%s_%s_%s",
+		ja4Version(fields.version),
+		nameFlag,
+		min(
+			len(ciphers),
+			99,
+		),
+		min(len(h.extensions)-countGREASEExtensions(h.extensions), 99),
+		fields.alpn,
+		ja4b,
+		ja4c,
+	), nil
 }
 
 func parseUint16Vector(data []byte, prefixBytes int) (values []uint16, err error) {
@@ -389,7 +381,7 @@ func truncatedSHA256(value string) (hash string) {
 }
 
 func isGREASE(value uint16) bool {
-	return byte(value>>8) == byte(value) && byte(value)&0x0f == 0x0a
+	return value>>8 == value&0xff && value&0x0f == 0x0a
 }
 
 func countGREASEExtensions(extensions []parsedExtension) (count int) {

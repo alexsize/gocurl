@@ -2,12 +2,13 @@ package client
 
 import (
 	"bytes"
-	"context"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/textproto"
 	"net/url"
+	"strings"
 
 	"github.com/ameshkov/gocurl/internal/config"
 	"github.com/ameshkov/gocurl/internal/output"
@@ -20,6 +21,7 @@ type obliviousHTTPTransport struct {
 	base         Transport
 	gatewayURL   *url.URL
 	publicConfig ohttp.PublicConfig
+	cfg          *config.Config
 	out          *output.Output
 }
 
@@ -35,11 +37,23 @@ func (t *obliviousHTTPTransport) Conn() (conn net.Conn) {
 // *obliviousHTTPTransport. It encrypts the request using OHTTP and sends it to
 // the gateway.
 func (t *obliviousHTTPTransport) RoundTrip(r *http.Request) (resp *http.Response, err error) {
+	r = r.Clone(withTLSLegContext(r.Context(), "gateway"))
+	r = withTLSProfileCheckContext(r, t.cfg.TLSProfileCheck || t.cfg.OutputJSON, t.cfg.TLSProfileDocument)
+
 	// Create an OHTTP client with the public configuration.
 	client := ohttp.NewDefaultClient(t.publicConfig)
 
-	// Serialize the original request using BinaryRequest format.
-	binaryReq := (*ohttp.BinaryRequest)(r)
+	// BinaryRequest encodes its path field from URL.Path, which excludes the
+	// query component. Put the escaped request-target (path plus query) in a
+	// cloned URL path so the Binary HTTP decoder reconstructs the complete URL.
+	binaryHTTPReq := *r
+	requestURL := *r.URL
+	requestURL.Path = r.URL.RequestURI()
+	requestURL.RawPath = ""
+	requestURL.RawQuery = ""
+	requestURL.ForceQuery = false
+	binaryHTTPReq.URL = &requestURL
+	binaryReq := (*ohttp.BinaryRequest)(&binaryHTTPReq)
 	requestBytes, err := binaryReq.Marshal()
 	if err != nil {
 		return nil, fmt.Errorf("failed to serialize request: %w", err)
@@ -59,7 +73,7 @@ func (t *obliviousHTTPTransport) RoundTrip(r *http.Request) (resp *http.Response
 
 	// Create a new HTTP POST request to the gateway with the encrypted payload.
 	gatewayReq, err := http.NewRequestWithContext(
-		context.Background(),
+		r.Context(),
 		http.MethodPost,
 		t.gatewayURL.String(),
 		bytes.NewReader(encapsulatedReqBytes),
@@ -121,6 +135,14 @@ func (t *obliviousHTTPTransport) RoundTrip(r *http.Request) (resp *http.Response
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse decrypted response: %w", err)
 	}
+	// Binary HTTP field names are lowercase on the wire. Normalize them to
+	// net/http's canonical map keys so Header.Get and Header.Values work.
+	canonicalHeaders := make(http.Header, len(resp.Header))
+	for name, values := range resp.Header {
+		canonicalName := textproto.CanonicalMIMEHeaderKey(name)
+		canonicalHeaders[canonicalName] = append(canonicalHeaders[canonicalName], values...)
+	}
+	resp.Header = canonicalHeaders
 
 	// bhttp may not set the status and proto fields, so we do it here.
 	if resp.Proto == "" {
@@ -130,6 +152,8 @@ func (t *obliviousHTTPTransport) RoundTrip(r *http.Request) (resp *http.Response
 	if resp.Status == "" {
 		resp.Status = fmt.Sprintf("%d", resp.StatusCode)
 	}
+	resp.Request = r
+	resp.TLS = gatewayResp.TLS
 
 	return resp, nil
 }
@@ -159,10 +183,28 @@ func newObliviousHTTPTransport(
 	out *output.Output,
 ) (rt Transport, err error) {
 	// Create base transport for requesting the KeyConfig.
-	keyTransport, _, err := newRoundTripper(cfg.OHTTPKeysURL.Hostname(), cfg, out)
+	keyTransport, keyDialer, err := newRoundTripper(cfg.OHTTPKeysURL.Hostname(), cfg, out)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create key transport: %w", err)
 	}
+	shareKeyTransport := sameOHTTPOrigin(cfg.OHTTPKeysURL, cfg.OHTTPGatewayURL)
+	if shareKeyTransport {
+		if httpTransport, ok := keyTransport.(*http.Transport); ok {
+			httpTransport.DisableKeepAlives = false
+		}
+	}
+	keepKeyTransport := false
+	defer func() {
+		if keepKeyTransport {
+			return
+		}
+		if conn := keyDialer.currentConn(); conn != nil {
+			_ = conn.Close()
+		}
+		if closer, ok := keyTransport.(interface{ CloseIdleConnections() }); ok {
+			closer.CloseIdleConnections()
+		}
+	}()
 
 	// Download the KeyConfig from the keys URL.
 	out.Debug("Downloading OHTTP KeyConfig from: %s", cfg.OHTTPKeysURL.String())
@@ -199,16 +241,47 @@ func newObliviousHTTPTransport(
 
 	out.Debug("OHTTP KeyConfig deserialized successfully, KeyID: %d", publicConfig.ID)
 
-	// Create base transport for communicating with the gateway.
-	gwTransport, d, err := newRoundTripper(cfg.OHTTPGatewayURL.Hostname(), cfg, out)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create gateway transport: %w", err)
+	// Reuse the keys connection when both endpoints have the same origin. This
+	// matters for HTTP/2, where the key fetch and gateway request can share one
+	// TLS connection without changing routing to a different origin.
+	baseTransport := keyTransport
+	d := keyDialer
+	if shareKeyTransport {
+		keepKeyTransport = true
+	} else {
+		baseTransport, d, err = newRoundTripper(cfg.OHTTPGatewayURL.Hostname(), cfg, out)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create gateway transport: %w", err)
+		}
 	}
 
 	return &obliviousHTTPTransport{
-		base:         &transport{d: d, base: gwTransport},
+		base:         &transport{d: d, base: baseTransport},
 		gatewayURL:   cfg.OHTTPGatewayURL,
 		publicConfig: publicConfig,
+		cfg:          cfg,
 		out:          out,
 	}, nil
+}
+
+func sameOHTTPOrigin(a, b *url.URL) bool {
+	if a == nil || b == nil || !strings.EqualFold(a.Scheme, b.Scheme) ||
+		!strings.EqualFold(a.Hostname(), b.Hostname()) {
+		return false
+	}
+	return ohttpPort(a) == ohttpPort(b)
+}
+
+func ohttpPort(u *url.URL) string {
+	if port := u.Port(); port != "" {
+		return port
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "http":
+		return "80"
+	case "https":
+		return "443"
+	default:
+		return ""
+	}
 }

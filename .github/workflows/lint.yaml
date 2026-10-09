@@ -11,7 +11,7 @@ jobs:
   golangci:
     strategy:
       matrix:
-        go: [stable]
+        go: ['1.26.5']
         os: [ubuntu-latest, macos-latest]
     name: lint
     runs-on: ${{ matrix.os }}
@@ -24,6 +24,7 @@ jobs:
         uses: golangci/golangci-lint-action@v9
         with:
           version: v2.10.1
+          args: --modules-download-mode=vendor
       - name: markdownlint-cli
         if: matrix.os == 'ubuntu-latest'
         uses: nosborn/github-action-markdown-cli@v3.5.0
