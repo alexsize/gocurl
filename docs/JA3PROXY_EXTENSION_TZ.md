@@ -1,7 +1,7 @@
 # Техническое задание: расширение gocurl для JA3Proxy
 
-- Редакция: 2.2
-- Дата последнего дополнения: 2026-10-09 (исходный аудит: 2026-09-29)
+- Редакция: 2.3
+- Дата последнего дополнения: 2026-10-11 (исходный аудит: 2026-09-29)
 - Статус: рабочее ТЗ и аудит текущей реализации
 - Целевая база: форк gocurl, работа ведётся в `main`
 - Схема TLS-профиля: `ja3proxy-client-profile/1`
@@ -333,7 +333,8 @@ transport parameters проверяется отдельно от HTTP/3 SETTING
    публичный Go API, быстрое распространение ошибки и ровно одну сетевую
    попытку.
 
-5. **P1 — сделать API/CLI parity исчерпывающей. Статус: ЧАСТИЧНО.**
+5. **P1 — сделать API/CLI parity исчерпывающей. Статус: ВЫПОЛНЕНО В
+   ДОКУМЕНТИРОВАННЫХ ГРАНИЦАХ.**
    README теперь содержит контрактную таблицу для всех 43 полей `Request` с
    CLI mapping, zero/nil semantics, основными ограничениями и регрессионными
    тестами. `TestRequestFieldContractTableCoversEveryField` сверяет таблицу с
@@ -375,9 +376,22 @@ transport parameters проверяется отдельно от HTTP/3 SETTING
    (`TestClientDoManualTLSClientHelloFieldsOnWire`); отдельный wire-тест
    проверяет `SupportedGroups`, `SignatureAlgorithms` и фактическую перестановку
    extension order (`TestClientDoManualTLSClientHelloExtensionFieldsOnWire`).
-   Пункт остаётся частичным: аналогичные API-level wire/e2e доказательства
-   требуются для остальных wire-значимых полей, а также отрицательные границы
-   там, где они применимы.
+   11 октября аудит всех полей завершён в
+   [единой матрице API/CLI parity](API_CLI_PARITY.md): 43 поля `Request` и 42
+   поля вложенных публичных типов. Матрица проверяется reflection-тестом и
+   ссылается на конкретные локальные wire/e2e-тесты, а не только на сериализацию.
+   Добавлено независимое сравнение validated `config.Config` API и CLI в 14
+   сценариях, 99 отрицательных API-сценариев до TCP/UDP dial и чтения Body,
+   а также проверки shared/explicit-zero QUIC windows, всех сочетаний
+   target/proxy certificate policies для native TLS и imported uTLS,
+   независимых non-strict profile checks, ECH discovery из локального DNS,
+   wildcard Resolve и zero/negative/nil body length semantics. Manual TLS
+   тест дополнительно сверяет захваченные cipher/version/ALPN vectors.
+   Native --ciphers проверяет точный набор, но не обещает порядок crypto/tls.
+   Unsupported ALPS/padding SHOULD подтверждаются PARTIAL_MATCH на реальном
+   handshake; unsupported MUST отвергается до соединения. Эти поля не
+   объявляются материализуемыми. Локальный quality gate и повторные race
+   прогоны описаны в матрице; remote CI и длительный fuzz остаются пунктами 7/8.
 
 6. **P1 — убрать публичную сеть из обязательных тестов. Статус: ВЫПОЛНЕНО.**
    CLI OHTTP-сценарии используют локальные key-config/gateway endpoints и

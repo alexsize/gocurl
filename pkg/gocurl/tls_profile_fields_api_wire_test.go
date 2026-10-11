@@ -14,6 +14,8 @@ import (
 	"slices"
 	"testing"
 	"time"
+
+	"github.com/ameshkov/gocurl/internal/client/utlsengine"
 )
 
 func TestClientDoManualTLSClientHelloExtensionFieldsOnWire(t *testing.T) {
@@ -34,6 +36,7 @@ func TestClientDoManualTLSClientHelloExtensionFieldsOnWire(t *testing.T) {
 	}
 
 	baseline := runManualClientHelloAPIRequest(t, certificate, baseProfile)
+	assertManualTLSWireVectors(t, baseline.fingerprint, baseProfile)
 	wantGroups := []uint16{uint16(tls.CurveP256)}
 	wantSignatures := []uint16{uint16(tls.PKCS1WithSHA256)}
 	if !slices.Equal(baseline.groups, wantGroups) {
@@ -59,6 +62,7 @@ func TestClientDoManualTLSClientHelloExtensionFieldsOnWire(t *testing.T) {
 	orderedProfile := baseProfile
 	orderedProfile.ExtensionOrder = wantOrder
 	got := runManualClientHelloAPIRequest(t, certificate, orderedProfile)
+	assertManualTLSWireVectors(t, got.fingerprint, orderedProfile)
 	if !slices.Equal(normalizeTLSGREASEExtensions(got.extensions), normalizeTLSGREASEExtensions(wantOrder)) {
 		t.Fatalf("ClientHello extension order = %v, want %v", got.extensions, wantOrder)
 	}
@@ -84,9 +88,10 @@ func normalizeTLSGREASEExtensions(ids []uint16) []uint16 {
 }
 
 type manualClientHelloObservation struct {
-	extensions []uint16
-	groups     []uint16
-	signatures []uint16
+	fingerprint utlsengine.Fingerprint
+	extensions  []uint16
+	groups      []uint16
+	signatures  []uint16
 }
 
 func runManualClientHelloAPIRequest(
@@ -156,10 +161,29 @@ func runManualClientHelloAPIRequest(
 		if parseErr != nil {
 			t.Fatalf("parse captured ClientHello: %v", parseErr)
 		}
+		// The listener strips the handshake header; restore its bounded length
+		// before parsing the actual captured bytes, never a generated profile.
+		if len(hello) > 65535 {
+			t.Fatal("fixture ClientHello exceeds one TLS record")
+		}
+		message := append([]byte{1, 0, byte((len(hello) >> 8) & 255), byte(len(hello) & 255)}, hello...)
+		observation.fingerprint, parseErr = utlsengine.FingerprintClientHello(message)
+		if parseErr != nil {
+			t.Fatalf("fingerprint captured ClientHello: %v", parseErr)
+		}
 		return observation
 	case <-ctx.Done():
 		t.Fatalf("wait for captured ClientHello: %v", ctx.Err())
 		return manualClientHelloObservation{}
+	}
+}
+
+func assertManualTLSWireVectors(t *testing.T, got utlsengine.Fingerprint, want TLSClientHello) {
+	t.Helper()
+	if !slices.Equal(got.CipherSuites, want.CipherSuites) ||
+		!slices.Equal(got.SupportedVersions, want.SupportedVersions) || !slices.Equal(got.ALPN, want.ALPN) {
+		t.Errorf("wire vectors ciphers=%v versions=%v ALPN=%v; want %v / %v / %v",
+			got.CipherSuites, got.SupportedVersions, got.ALPN, want.CipherSuites, want.SupportedVersions, want.ALPN)
 	}
 }
 

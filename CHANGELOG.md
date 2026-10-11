@@ -13,6 +13,13 @@ adheres to [Semantic Versioning][semver].
 
 ### Added
 
+- Added a checked API/CLI parity matrix for all public request fields,
+  independent validated CLI/API configuration comparisons, and public API
+  rejection tests before TCP/UDP dialing or body consumption. Added on-wire
+  shared/explicit-zero QUIC windows, independent proxy/target certificate and
+  non-strict profile policies, local DNS ECH discovery, exact native cipher-set
+  and manual ClientHello vector assertions, and unsupported SHOULD reports.
+
 - Added bounded fuzz targets for HTTP/2 settings and orders, QUIC numeric
   options and parameter order, profile JSON/constraints, and SOCKS UDP target
   addresses. Fixed UDP target ports outside 0..65535 while preserving port zero.

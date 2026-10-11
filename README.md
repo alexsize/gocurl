@@ -556,6 +556,10 @@ the encoded ClientHello record.
 
 ### Request field contract
 
+The complete [API/CLI parity matrix](docs/API_CLI_PARITY.md) includes every
+top-level and nested public request field, independent CLI configuration
+comparisons, actual local wire/e2e evidence, and applicable negative boundaries.
+
 The table below lists every top-level `Request` field, its CLI equivalent (or
 why there is none), and the zero/nil behavior and principal constraints.
 Field-level test names are maintained in the adjacent Go API test files;
