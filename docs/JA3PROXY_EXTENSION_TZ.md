@@ -401,7 +401,8 @@ transport parameters проверяется отдельно от HTTP/3 SETTING
    `GOCURL_NETWORK_INTEGRATION=1`; по умолчанию они пропускаются. Обязательный
    suite не обращается к публичным DNS или HTTP endpoints.
 
-7. **P1 — синхронизировать CI и заявленный quality gate. Статус: ЧАСТИЧНО.**
+7. **P1 — синхронизировать CI и заявленный quality gate. Статус: ВЫПОЛНЕНО
+   В УТОЧНЁННОЙ ЛОКАЛЬНОЙ ОБЛАСТИ ПРИЁМКИ.**
    `make check` и GitHub Actions используют vendored зависимости и включают
    `go mod verify`, race suite, `go vet`, all-package build, markdownlint,
    `golangci-lint` и отдельные vendored QUIC wire tests. Все schema/golden
@@ -433,8 +434,10 @@ transport parameters проверяется отдельно от HTTP/3 SETTING
    для будущего отдельно разрешённого запуска, без заявления о проверке macOS.
    Исправлены bypass release gate при ошибке отдельного lint workflow,
    Windows-only PATH/tool discovery PowerShell gate и гонка SOCKS deadline,
-   обнаруженная native Linux тестами. Локальные Windows/WSL gate прошли;
-   перед закрытием остаётся подтвердить их из независимых чистых checkout.
+   обнаруженная native Linux тестами. Полные Windows/WSL gate прошли также
+   из независимых чистых local clone коммита `f1a0a89`. В каждом clone после
+   module verify, Markdown/Go lint, vet, обычных/race tests с benchmarks,
+   vendored QUIC wire tests и build отсутствуют tracked/untracked изменения.
    Подробности — в [отчёте локальных проверок](LOCAL_QUALITY_GATE.md).
    Push разрешён только в goCURL/main с `[skip ci]`, без тегов и без запуска
    GitHub runners. Корневой JA3Proxy в этот scope не входит.

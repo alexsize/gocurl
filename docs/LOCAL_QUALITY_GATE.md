@@ -90,7 +90,26 @@ git status --porcelain --untracked-files=all
 
 ## Результаты и границы
 
-Результаты полных gate на чистых checkout будут внесены после их завершения.
+Полные gate прошли на рабочих деревьях Windows/WSL и повторно из независимых
+local clone коммита `f1a0a89b010fc5598c3f935fe8f087e89fdba7f1`:
+
+| Среда | Независимый checkout | Результат |
+| --- | --- | --- |
+| Windows amd64 | `C:\Users\Alex\AppData\Local\Temp\gocurl-gate-20261012-4888dde863a04bfd807c0fe913d20435` | `WINDOWS_CLEAN_CHECKOUT_GATE_PASS` |
+| Ubuntu 24.04 WSL, Linux amd64, native filesystem | `/home/sw/gocurl-gate-20261012-ca7rM1iU` | `WSL_CLEAN_CHECKOUT_GATE_PASS` |
+
+В обеих средах прошли module verification, Markdownlint, Go lint с 0 issues,
+vet, обычные тесты без race instrumentation, race suite с benchmarks,
+vendored QUIC wire tests и all-package build. После gate `git status
+--porcelain --untracked-files=all` пустой; untracked исходники для прохождения
+не нужны. `go mod tidy -diff` в рабочем checkout также не обнаружил расхождений.
+Это не обещание offline build с пустыми module/tool caches.
+
+GitNexus staged review: MEDIUM, 55 изменённых символов, три ожидаемых SOCKS
+процесса. Изменение общего CRITICAL обработчика таймаутов не потребовалось.
+Пункт 7 закрыт в явно уточнённой пользователем локальной области приёмки.
+В goCURL backlog остаются пункты 8, 9, 10.
+
 macOS и hosted GitHub Actions не проверяются по прямому указанию пользователя;
 их конфигурация сохранена для будущего отдельно разрешённого запуска.
 Публикация разрешена только в `alexsize/gocurl/main`, без тегов. При push
