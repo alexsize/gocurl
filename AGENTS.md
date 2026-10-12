@@ -11,7 +11,7 @@ module.
 - `make init` — installs the git pre-commit hook (it is NOT installed by
   default on clone). The hook blocks commits containing `FIXME` or `TODO!!` in
   staged non-doc files and then runs `make check`.
-- `make check` — the CI quality gate: `make lint` then `make test`. This is what
+- `make check` — the CI quality gate: verify, lint, vet, test and all-package build. This is what
   the pre-commit hook and CI run; mirror it before finishing work.
 - `make lint` — `npx markdownlint-cli .` (needs Node.js; config in
   `.markdownlint.json`) then `golangci-lint run`.
@@ -82,7 +82,7 @@ module.
 - In the JA3Proxy workspace, this gocurl checkout is `C:\ja3proxy\gocurl`; do not use the former temporary checkout, and keep work on `main`.
 - When bumping the Go version, update it in `go.mod` first (source of truth),
   then the `golang:...` image tag in `Dockerfile` and the version mention in the
-  intro of this file. CI workflows use `go-version: stable` and need no edit.
+  intro of this file. The Build quality/release jobs read `go-version-file: go.mod`.
 - Add new guidelines to this "Guidelines" section automatically whenever you are
   asked to add a guideline, or infer from the conversation that a correction
   deserves to be codified as one. Keep each guideline concise and actionable.
@@ -93,7 +93,7 @@ module.
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **gocurl** (2631 symbols, 8781 relationships, 195 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **gocurl** (2689 symbols, 8930 relationships, 203 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > Index stale? Run `node .gitnexus/run.cjs analyze` from the project root — it auto-selects an available runner. No `.gitnexus/run.cjs` yet? `npx gitnexus analyze` (npm 11 crash → `npm i -g gitnexus`; #1939).
 

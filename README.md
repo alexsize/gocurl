@@ -687,17 +687,24 @@ Useful commands:
 
 - `make lint` — run `markdownlint-cli` and `golangci-lint`.
 - `make test` — run the test suite.
-- `make check` — run `make lint` and `make test` in sequence.
+- `make check` — verify modules, lint, vet, ordinary/race tests, vendored QUIC tests, and build.
 - `make build` — build the `gocurl` binary.
 
 For Windows without `make`, run `powershell -File .\scripts\check.ps1`.
 The script selects an installed Go with the same major/minor version as
 `go.mod`, checks the linter's build toolchain, and runs module verification,
-Markdown lint, Go lint, vet, race tests with benchmarks, vendored QUIC tests,
+Markdown lint, Go lint, vet, ordinary tests, race tests with benchmarks, vendored QUIC tests,
 and build. It stops on the first failure and restores PATH and GOTOOLCHAIN.
 Use `-GoExecutable` and `-LintExecutable` to specify executable paths.
-Do not mix a newer Go toolchain with a linter built with an older Go: the
-linters may crash instead of reporting code issues.
+Do not mix a newer Go major/minor toolchain with a linter built with an older
+Go major/minor: linters may crash instead of reporting code issues. Patch
+versions need not be identical when the linter supports the module toolchain.
+
+The same script also runs with native Linux PowerShell in WSL. See
+[local Windows/WSL verification](docs/LOCAL_QUALITY_GATE.md) for tool setup,
+clean-checkout commands, and the scope of recorded results. The Build workflow
+includes both linters in its mandatory test matrix; release packaging depends
+on that complete gate. This does not imply that hosted runners were executed.
 
 <a id="allcmdarguments"></a>
 

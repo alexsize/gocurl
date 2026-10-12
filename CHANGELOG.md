@@ -13,6 +13,16 @@ adheres to [Semantic Versioning][semver].
 
 ### Added
 
+- Fixed a SOCKS connect-timeout race where the socket deadline could fire
+  before context cancellation was published, losing the DeadlineExceeded
+  cause. Independent socket timeouts and unrelated errors remain unchanged.
+
+- Consolidated Go/Markdown lint into the mandatory Build quality matrix,
+  blocking release packaging on lint failures. Added workflow-contract
+  regressions, shared ordinary/race test commands, native WSL tool setup,
+  and platform-correct PowerShell PATH/tool discovery. Local Windows/WSL
+  acceptance replaces hosted-runner checks at the user's request.
+
 - Added a checked API/CLI parity matrix for all public request fields,
   independent validated CLI/API configuration comparisons, and public API
   rejection tests before TCP/UDP dialing or body consumption. Added on-wire

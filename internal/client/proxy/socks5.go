@@ -87,9 +87,7 @@ func (d *socks5Dialer) DialContext(ctx context.Context, network, addr string) (c
 		for _, stop := range stops {
 			stop()
 		}
-		if ctx.Err() != nil {
-			err = ctx.Err()
-		}
+		err = socksContextError(ctx, err)
 		if err == nil {
 			for _, socket := range opened {
 				if err = socket.SetDeadline(time.Time{}); err != nil {

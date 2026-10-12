@@ -13,6 +13,7 @@ try {
         throw 'Не удалось определить минимальную версию Go из go.mod.'
     }
     $minimumGo = [version]$Matches[1]
+    $isWindowsPlatform = [IO.Path]::DirectorySeparatorChar -eq '\'
     $env:GOTOOLCHAIN = 'local'
     $candidates = @()
     if ($GoExecutable) {
@@ -20,14 +21,16 @@ try {
     } else {
         $currentGo = Get-Command go -CommandType Application -ErrorAction SilentlyContinue
         if ($currentGo) { $candidates += $currentGo.Source }
-        $programs = Join-Path $env:LOCALAPPDATA 'Programs'
-        $candidates += Join-Path $env:ProgramFiles 'Go\bin\go.exe'
-        if (Test-Path -LiteralPath (Join-Path $programs 'Go')) {
-            $candidates += Get-ChildItem -LiteralPath (Join-Path $programs 'Go') -Directory |
-                ForEach-Object { Join-Path $_.FullName 'bin\go.exe' }
+        if ($isWindowsPlatform) {
+            $programs = Join-Path $env:LOCALAPPDATA 'Programs'
+            $candidates += Join-Path $env:ProgramFiles 'Go\bin\go.exe'
+            if (Test-Path -LiteralPath (Join-Path $programs 'Go')) {
+                $candidates += Get-ChildItem -LiteralPath (Join-Path $programs 'Go') -Directory |
+                    ForEach-Object { Join-Path $_.FullName 'bin\go.exe' }
+            }
+            $candidates += Get-ChildItem -LiteralPath $programs -Directory -Filter 'Go*' |
+                ForEach-Object { Join-Path $_.FullName 'go\bin\go.exe' }
         }
-        $candidates += Get-ChildItem -LiteralPath $programs -Directory -Filter 'Go*' |
-            ForEach-Object { Join-Path $_.FullName 'go\bin\go.exe' }
     }
     $selectedGo = $null
     foreach ($candidate in $candidates | Select-Object -Unique) {
@@ -41,11 +44,12 @@ try {
         }
     }
     if (!$selectedGo) { throw "Нужен установленный Go $($minimumGo.Major).$($minimumGo.Minor).x не ниже $minimumGo. Передайте -GoExecutable." }
-    $env:PATH = (Split-Path $selectedGo -Parent) + ';' + $previousPath
+    $env:PATH = (Split-Path $selectedGo -Parent) + [IO.Path]::PathSeparator + $previousPath
     if (!$LintExecutable) {
         $linter = Get-Command golangci-lint -CommandType Application -ErrorAction SilentlyContinue
         if ($linter) { $LintExecutable = $linter.Source } else {
-            $goBin = Join-Path ([Environment]::GetFolderPath('UserProfile')) 'go\bin\golangci-lint.exe'
+            $lintRelativePath = if ($isWindowsPlatform) { 'go/bin/golangci-lint.exe' } else { 'go/bin/golangci-lint' }
+            $goBin = Join-Path ([Environment]::GetFolderPath('UserProfile')) $lintRelativePath
             if (Test-Path -LiteralPath $goBin) { $LintExecutable = $goBin }
         }
     }
@@ -68,6 +72,8 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'golangci-lint обнаружил ошибки.' }
     & $selectedGo vet -mod=vendor ./...
     if ($LASTEXITCODE -ne 0) { throw 'go vet обнаружил ошибки.' }
+    & $selectedGo test -count=1 -mod=vendor ./...
+    if ($LASTEXITCODE -ne 0) { throw 'go test без race завершился с ошибкой.' }
     & $selectedGo test -race -count=1 -v '-bench=.' -mod=vendor ./...
     if ($LASTEXITCODE -ne 0) { throw 'go test завершился с ошибкой.' }
     & $selectedGo test -race -count=1 -mod=vendor -run 'Test(ReorderTransportParametersKeepsGreaseAndUnlistedOrder|TransportParametersMarshalUsesConfiguredOrder|TransportParametersMarshalPreservesExplicitZeroValues)$' github.com/quic-go/quic-go/internal/wire

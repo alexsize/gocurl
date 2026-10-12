@@ -31,6 +31,7 @@ lint:
 	golangci-lint run --modules-download-mode=vendor
 
 test:
+	go test -count=1 -mod=vendor ./...
 	go test -race -count=1 -v -bench=. -mod=vendor ./...
 	go test -race -count=1 -v -mod=vendor -run 'Test(ReorderTransportParametersKeepsGreaseAndUnlistedOrder|TransportParametersMarshalUsesConfiguredOrder|TransportParametersMarshalPreservesExplicitZeroValues)$$' github.com/quic-go/quic-go/internal/wire
 
